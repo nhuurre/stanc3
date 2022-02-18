@@ -1,5 +1,4 @@
 open Core_kernel.Poly
-module UnsizedType = Middle.UnsizedType
 
 (** Type to represent promotions in the typechecker.
   This can be used to return information about how to promote

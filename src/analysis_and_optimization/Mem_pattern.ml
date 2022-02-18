@@ -127,7 +127,7 @@ let query_stan_math_mem_pattern_support (name : string)
       let filteredmatches =
         List.filter
           ~f:(fun x ->
-            Frontend.SignatureMismatch.check_compatible_arguments_mod_conv
+            Middle.SignatureMismatch.check_compatible_arguments_mod_conv
               (snd3 x) args
             |> Result.is_ok )
           namematches in

@@ -1,6 +1,5 @@
 open Core_kernel
 open Core_kernel.Poly
-open Middle
 module TypeMap = Core_kernel.Map.Make_using_comparator (UnsizedType)
 
 let set ctx key data = ctx := TypeMap.set !ctx ~key ~data
