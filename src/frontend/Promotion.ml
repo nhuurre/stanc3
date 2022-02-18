@@ -1,4 +1,3 @@
-open Core_kernel
 open Core_kernel.Poly
 module UnsizedType = Middle.UnsizedType
 
@@ -12,58 +11,6 @@ type t =
   | ToComplexVar (* used in arrays, not functions *)
   | IntToComplex
   | RealToComplex
-
-let promote_inner (exp : Ast.typed_expression) prom =
-  let emeta = exp.emeta in
-  match prom with
-  | ToVar ->
-      Ast.
-        { expr= Ast.Promotion (exp, UReal, AutoDiffable)
-        ; emeta=
-            { emeta with
-              type_= UnsizedType.promote_array emeta.type_ UReal
-            ; ad_level= AutoDiffable } }
-  | ToComplexVar ->
-      Ast.
-        { expr= Ast.Promotion (exp, UComplex, AutoDiffable)
-        ; emeta=
-            { emeta with
-              type_= UnsizedType.promote_array emeta.type_ UComplex
-            ; ad_level= AutoDiffable } }
-  | IntToReal when UnsizedType.is_int_type emeta.type_ ->
-      Ast.
-        { expr= Ast.Promotion (exp, UReal, emeta.ad_level)
-        ; emeta= {emeta with type_= UnsizedType.promote_array emeta.type_ UReal}
-        }
-  | (IntToComplex | RealToComplex)
-    when not (UnsizedType.is_complex_type emeta.type_) ->
-      (* these two promotions are separated for cost, but are actually the same promotion *)
-      { expr= Promotion (exp, UComplex, emeta.ad_level)
-      ; emeta= {emeta with type_= UnsizedType.promote_array emeta.type_ UComplex}
-      }
-  | _ -> exp
-
-let rec promote (exp : Ast.typed_expression) prom =
-  (* promote arrays and rowvector literals at the lowest level to avoid unnecessary copies *)
-  let open Ast in
-  match exp.expr with
-  | ArrayExpr es ->
-      let pes = List.map ~f:(fun e -> promote e prom) es in
-      let fst = List.hd_exn pes in
-      let type_, ad_level = (fst.emeta.type_, fst.emeta.ad_level) in
-      { expr= ArrayExpr pes
-      ; emeta=
-          { exp.emeta with
-            type_= UnsizedType.promote_array exp.emeta.type_ type_
-          ; ad_level } }
-  | RowVectorExpr (_ :: _ as es) ->
-      let pes = List.map ~f:(fun e -> promote e prom) es in
-      let fst = List.hd_exn pes in
-      let ad_level = fst.emeta.ad_level in
-      {expr= RowVectorExpr pes; emeta= {exp.emeta with ad_level}}
-  | _ -> promote_inner exp prom
-
-let promote_list es promotions = List.map2_exn es promotions ~f:promote
 
 (** Get the promotion needed to make the second type into the first.
   Types NEED to have previously been checked to be promotable

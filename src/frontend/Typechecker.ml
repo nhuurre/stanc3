@@ -161,6 +161,59 @@ let is_of_compatible_return_type rt1 srt2 =
     | ReturnType _, AnyReturnType -> true
     | _ -> false)
 
+(* -- Promotions -------------------------------------------------- *)
+let promote_inner (exp : Ast.typed_expression) prom =
+  let emeta = exp.emeta in
+  match prom with
+  | Promotion.ToVar ->
+      Ast.
+        { expr= Ast.Promotion (exp, UReal, AutoDiffable)
+        ; emeta=
+            { emeta with
+              type_= UnsizedType.promote_array emeta.type_ UReal
+            ; ad_level= AutoDiffable } }
+  | ToComplexVar ->
+      Ast.
+        { expr= Ast.Promotion (exp, UComplex, AutoDiffable)
+        ; emeta=
+            { emeta with
+              type_= UnsizedType.promote_array emeta.type_ UComplex
+            ; ad_level= AutoDiffable } }
+  | IntToReal when UnsizedType.is_int_type emeta.type_ ->
+      Ast.
+        { expr= Ast.Promotion (exp, UReal, emeta.ad_level)
+        ; emeta= {emeta with type_= UnsizedType.promote_array emeta.type_ UReal}
+        }
+  | (IntToComplex | RealToComplex)
+    when not (UnsizedType.is_complex_type emeta.type_) ->
+      (* these two promotions are separated for cost, but are actually the same promotion *)
+      { expr= Promotion (exp, UComplex, emeta.ad_level)
+      ; emeta= {emeta with type_= UnsizedType.promote_array emeta.type_ UComplex}
+      }
+  | _ -> exp
+
+let rec promote (exp : Ast.typed_expression) prom =
+  (* promote arrays and rowvector literals at the lowest level to avoid unnecessary copies *)
+  let open Ast in
+  match exp.expr with
+  | ArrayExpr es ->
+      let pes = List.map ~f:(fun e -> promote e prom) es in
+      let fst = List.hd_exn pes in
+      let type_, ad_level = (fst.emeta.type_, fst.emeta.ad_level) in
+      { expr= ArrayExpr pes
+      ; emeta=
+          { exp.emeta with
+            type_= UnsizedType.promote_array exp.emeta.type_ type_
+          ; ad_level } }
+  | RowVectorExpr (_ :: _ as es) ->
+      let pes = List.map ~f:(fun e -> promote e prom) es in
+      let fst = List.hd_exn pes in
+      let ad_level = fst.emeta.ad_level in
+      {expr= RowVectorExpr pes; emeta= {exp.emeta with ad_level}}
+  | _ -> promote_inner exp prom
+
+let promote_list es promotions = List.map2_exn es promotions ~f:promote
+
 (* -- Expressions ------------------------------------------------- *)
 let check_ternary_if loc pe te fe =
   let promote expr type_ ad_level =
@@ -186,22 +239,6 @@ let check_ternary_if loc pe te fe =
         fe.emeta.type_
       |> error
 
-let match_to_rt_option = function
-  | SignatureMismatch.UniqueMatch (rt, _, _) -> Some rt
-  | _ -> None
-
-let stan_math_return_type name arg_tys =
-  match name with
-  | x when Stan_math_signatures.is_reduce_sum_fn x ->
-      Some (UnsizedType.ReturnType UReal)
-  | x when Stan_math_signatures.is_variadic_ode_fn x ->
-      Some (UnsizedType.ReturnType (UArray UVector))
-  | x when Stan_math_signatures.is_variadic_dae_fn x ->
-      Some (UnsizedType.ReturnType (UArray UVector))
-  | _ ->
-      SignatureMismatch.matching_stanlib_function name arg_tys
-      |> match_to_rt_option
-
 let operator_stan_math_return_type op arg_tys =
   match (op, arg_tys) with
   | Operator.IntDivide, [(_, UnsizedType.UInt); (_, UInt)] ->
@@ -210,7 +247,7 @@ let operator_stan_math_return_type op arg_tys =
   | _ ->
       Stan_math_signatures.operator_to_stan_math_fns op
       |> List.filter_map ~f:(fun name ->
-             SignatureMismatch.matching_stanlib_function name arg_tys
+             Environment.matching_stanlib_function name arg_tys
              |> function
              | SignatureMismatch.UniqueMatch (rt, _, p) -> Some (rt, p)
              | _ -> None )
@@ -218,9 +255,10 @@ let operator_stan_math_return_type op arg_tys =
 
 let assignmentoperator_stan_math_return_type assop arg_tys =
   ( match assop with
-  | Operator.Divide ->
-      SignatureMismatch.matching_stanlib_function "divide" arg_tys
-      |> match_to_rt_option
+  | Operator.Divide -> (
+    match Environment.matching_stanlib_function "divide" arg_tys with
+    | UniqueMatch (rt, _, _) -> Some rt
+    | _ -> None )
   | Plus | Minus | Times | EltTimes | EltDivide ->
       operator_stan_math_return_type assop arg_tys |> Option.map ~f:fst
   | _ -> None )
@@ -238,7 +276,7 @@ let check_binop loc op le re =
   match rt with
   | Some (ReturnType type_, [p1; p2]) ->
       mk_typed_expression
-        ~expr:(BinOp (Promotion.promote le p1, op, Promotion.promote re p2))
+        ~expr:(BinOp (promote le p1, op, promote re p2))
         ~ad_level:(expr_ad_lub [le; re])
         ~type_ ~loc
   | _ ->
@@ -327,7 +365,7 @@ let check_array_expr loc es =
     | Ok (ad_level, type_, promotions) ->
         let type_ = UnsizedType.UArray type_ in
         mk_typed_expression
-          ~expr:(ArrayExpr (Promotion.promote_list es promotions))
+          ~expr:(ArrayExpr (promote_list es promotions))
           ~ad_level ~type_ ~loc )
 
 let check_rowvector loc es =
@@ -336,7 +374,7 @@ let check_rowvector loc es =
     match get_consistent_types ad_level URowVector es with
     | Ok (ad_level, _, promotions) ->
         mk_typed_expression
-          ~expr:(RowVectorExpr (Promotion.promote_list es promotions))
+          ~expr:(RowVectorExpr (promote_list es promotions))
           ~ad_level ~type_:UMatrix ~loc
     | Error (_, meta) ->
         Semantic_error.invalid_matrix_types meta.loc meta.type_ |> error )
@@ -344,7 +382,7 @@ let check_rowvector loc es =
     match get_consistent_types DataOnly UReal es with
     | Ok (ad_level, _, promotions) ->
         mk_typed_expression
-          ~expr:(RowVectorExpr (Promotion.promote_list es promotions))
+          ~expr:(RowVectorExpr (promote_list es promotions))
           ~ad_level ~type_:URowVector ~loc
     | Error (_, meta) ->
         Semantic_error.invalid_row_vector_types meta.loc meta.type_ |> error )
@@ -489,9 +527,7 @@ let check_normal_fn ~is_cond_dist loc tenv id es =
        This is not needed until UDFs can be higher-order, as it is special cased for
        variadic functions
     *)
-    match
-      SignatureMismatch.matching_function tenv id.name (get_arg_types es)
-    with
+    match Environment.matching_function tenv id.name (get_arg_types es) with
     | UniqueMatch (Void, _, _) ->
         Semantic_error.returning_fn_expected_nonreturning_found loc id.name
         |> error
@@ -501,7 +537,7 @@ let check_normal_fn ~is_cond_dist loc tenv id es =
             (mk_fun_app ~is_cond_dist
                ( fnk (Fun_kind.suffix_from_name id.name)
                , id
-               , Promotion.promote_list es promotions ) )
+               , promote_list es promotions ) )
           ~ad_level:(expr_ad_lub es) ~type_:ut ~loc
     | AmbiguousMatch sigs ->
         Semantic_error.ambiguous_function_promotion loc id.name
@@ -603,7 +639,7 @@ and check_reduce_sum ~is_cond_dist loc cf tenv id tes =
         mk_typed_expression
           ~expr:
             (mk_fun_app ~is_cond_dist
-               (StanLib FnPlain, id, Promotion.promote_list tes promotions) )
+               (StanLib FnPlain, id, promote_list tes promotions) )
           ~ad_level:(expr_ad_lub tes) ~type_:UnsizedType.UReal ~loc
     | AmbiguousMatch ps ->
         Semantic_error.ambiguous_function_promotion loc fname.name None ps
@@ -650,7 +686,7 @@ and check_variadic_ode ~is_cond_dist loc cf tenv id tes =
         mk_typed_expression
           ~expr:
             (mk_fun_app ~is_cond_dist
-               (StanLib FnPlain, id, Promotion.promote_list tes promotions) )
+               (StanLib FnPlain, id, promote_list tes promotions) )
           ~ad_level:(expr_ad_lub tes)
           ~type_:Stan_math_signatures.variadic_ode_return_type ~loc
     | AmbiguousMatch ps ->
@@ -696,7 +732,7 @@ and check_variadic_dae ~is_cond_dist loc cf tenv id tes =
         mk_typed_expression
           ~expr:
             (mk_fun_app ~is_cond_dist
-               (StanLib FnPlain, id, Promotion.promote_list tes promotions) )
+               (StanLib FnPlain, id, promote_list tes promotions) )
           ~ad_level:(expr_ad_lub tes)
           ~type_:Stan_math_signatures.variadic_dae_return_type ~loc
     | AmbiguousMatch ps ->
@@ -894,16 +930,14 @@ let check_nrfn loc tenv id es =
         (Env.nearest_ident tenv id.name)
       |> error
   | _ (* a function *) -> (
-    match
-      SignatureMismatch.matching_function tenv id.name (get_arg_types es)
-    with
+    match Environment.matching_function tenv id.name (get_arg_types es) with
     | UniqueMatch (Void, fnk, promotions) ->
         mk_typed_statement
           ~stmt:
             (NRFunApp
                ( fnk (Fun_kind.suffix_from_name id.name)
                , id
-               , Promotion.promote_list es promotions ) )
+               , promote_list es promotions ) )
           ~return_type:NoReturnType ~loc
     | UniqueMatch (ReturnType _, _, _) ->
         Semantic_error.nonreturning_fn_expected_returning_found loc id.name
@@ -947,7 +981,7 @@ let check_assignment_operator loc assop lhs rhs =
       SignatureMismatch.check_of_same_type_mod_conv lhs.lmeta.type_
         rhs.emeta.type_
     with
-    | Ok p -> Promotion.promote rhs p
+    | Ok p -> promote rhs p
     | Error _ -> err Operator.Equals |> error )
   | OperatorAssign op -> (
       let args = List.map ~f:arg_type [Ast.expr_of_lvalue lhs; rhs] in
@@ -1071,7 +1105,7 @@ let verify_sampling_distribution loc tenv id arguments =
   let argumenttypes = List.map ~f:arg_type arguments in
   let is_name_w_suffix_sampling_dist suffix =
     match
-      SignatureMismatch.matching_stanlib_function (name ^ suffix) argumenttypes
+      Environment.matching_stanlib_function (name ^ suffix) argumenttypes
     with
     | UniqueMatch (ReturnType UReal, _, _) -> true
     | _ -> false in
@@ -1081,9 +1115,7 @@ let verify_sampling_distribution loc tenv id arguments =
     && name <> "binomial_coefficient"
     && name <> "multiply" in
   let is_name_w_suffix_udf_sampling_dist suffix =
-    match
-      SignatureMismatch.matching_function tenv (name ^ suffix) argumenttypes
-    with
+    match Environment.matching_function tenv (name ^ suffix) argumenttypes with
     | UniqueMatch (rt, f, _)
       when rt = ReturnType UReal && f FnPlain = UserDefined FnPlain ->
         true
@@ -1100,14 +1132,12 @@ let is_cumulative_density_defined tenv id arguments =
   let argumenttypes = List.map ~f:arg_type arguments in
   let is_real_rt_for_suffix suffix =
     match
-      SignatureMismatch.matching_stanlib_function (name ^ suffix) argumenttypes
+      Environment.matching_stanlib_function (name ^ suffix) argumenttypes
     with
     | UniqueMatch (ReturnType UReal, _, _) -> true
     | _ -> false in
   let valid_arg_types_for_suffix suffix =
-    match
-      SignatureMismatch.matching_function tenv (name ^ suffix) argumenttypes
-    with
+    match Environment.matching_function tenv (name ^ suffix) argumenttypes with
     | UniqueMatch (rt, _, _) when rt = ReturnType UReal -> true
     | _ -> false in
   ( is_real_rt_for_suffix "_lcdf"
@@ -1418,7 +1448,7 @@ and check_var_decl_initial_value loc cf tenv id init_val_opt =
         SignatureMismatch.check_of_same_type_mod_conv lhs.lmeta.type_
           rhs.emeta.type_
       with
-      | Ok p -> Some (Promotion.promote rhs p)
+      | Ok p -> Some (promote rhs p)
       | Error _ ->
           Semantic_error.illtyped_assignment loc Equals lhs.lmeta.type_
             rhs.emeta.type_

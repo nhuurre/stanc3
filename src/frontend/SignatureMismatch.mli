@@ -27,9 +27,9 @@ type ('unique, 'error) generic_match_result =
   | SignatureErrors of 'error
 
 (** The match result for general (non-variadic) functions *)
-type match_result =
+type 'fun_kind match_result =
   ( UnsizedType.returntype
-    * (bool Middle.Fun_kind.suffix -> Ast.fun_kind)
+    * (bool Fun_kind.suffix -> 'fun_kind)
     * Promotion.t list
   , signature_error list * bool )
   generic_match_result
@@ -45,21 +45,24 @@ val check_compatible_arguments_mod_conv :
 val unique_minimum_promotion :
   ('a * Promotion.t list) list -> ('a * Promotion.t list, 'a list option) result
 
-val matching_function :
-     Environment.t
-  -> string
+val find_compatible_rt :
+     ( UnsizedType.returntype
+     * (UnsizedType.autodifftype * UnsizedType.t) list
+     * (bool Fun_kind.suffix -> 'fun_kind)
+     * Common.Helpers.mem_pattern )
+     list
   -> (UnsizedType.autodifftype * UnsizedType.t) list
-  -> match_result
-(** Searches for a function of the given name which can
-    support the required argument types.
-    Requires a unique minimum option under type promotion
-*)
+  -> 'fun_kind match_result
 
-val matching_stanlib_function :
-  string -> (UnsizedType.autodifftype * UnsizedType.t) list -> match_result
-(** Same as [matching_function] but requires specifically that the function
-    be from StanMath (uses [Environment.stan_math_environment])
-*)
+val stan_math_return_type :
+     string
+  -> (UnsizedType.autodifftype * UnsizedType.t) list
+  -> UnsizedType.returntype option
+
+val operator_stan_math_return_type :
+     Operator.t
+  -> (UnsizedType.autodifftype * UnsizedType.t) list
+  -> (UnsizedType.returntype * Promotion.t list) option
 
 val check_variadic_args :
      bool

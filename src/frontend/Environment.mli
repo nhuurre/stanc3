@@ -54,3 +54,21 @@ val iter : t -> (info list -> unit) -> unit
 
 val nearest_ident : t -> string -> string option
 (** The nearest identifier by edit distance, capped at edit distance 3 (if one exists) *)
+
+val matching_function :
+     t
+  -> string
+  -> (UnsizedType.autodifftype * UnsizedType.t) list
+  -> Ast.fun_kind SignatureMismatch.match_result
+(** Searches for a function of the given name which can
+    support the required argument types.
+    Requires a unique minimum option under type promotion
+*)
+
+val matching_stanlib_function :
+     string
+  -> (UnsizedType.autodifftype * UnsizedType.t) list
+  -> Ast.fun_kind SignatureMismatch.match_result
+(** Same as [matching_function] but requires specifically that the function
+    be from StanMath (uses [Environment.stan_math_environment])
+*)

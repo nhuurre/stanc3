@@ -86,9 +86,9 @@ type ('unique, 'error) generic_match_result =
       list
   | SignatureErrors of 'error
 
-type match_result =
+type 'fun_kind match_result =
   ( UnsizedType.returntype
-    * (bool Middle.Fun_kind.suffix -> Ast.fun_kind)
+    * (bool Fun_kind.suffix -> 'fun_kind)
     * Promotion.t list
   , signature_error list * bool )
   generic_match_result
@@ -171,14 +171,6 @@ let check_of_same_type_mod_conv = check_same_type 0
 let check_compatible_arguments_mod_conv = check_compatible_arguments 0
 let max_n_errors = 5
 
-let extract_function_types f =
-  match f with
-  | Environment.{type_= UFun (args, return, _, mem); kind= `StanMath} ->
-      Some (return, args, (fun x -> Ast.StanLib x), mem)
-  | {type_= UFun (args, return, _, mem); _} ->
-      Some (return, args, (fun x -> UserDefined x), mem)
-  | _ -> None
-
 let unique_minimum_promotion promotion_options =
   let size (_, p) =
     List.fold ~init:0 ~f:(fun acc p -> acc + Promotion.promotion_cost p) p in
@@ -200,6 +192,9 @@ let unique_minimum_promotion promotion_options =
 
 let find_compatible_rt function_types args =
   (* NB: Variadic arguments are special-cased in the typechecker and not handled here *)
+  let function_types =
+    List.sort function_types ~compare:(fun (ret1, _, _, _) (ret2, _, _, _) ->
+        UnsizedType.compare_returntype ret1 ret2 ) in
   let matches, errors =
     List.partition_map function_types
       ~f:(fun (rt, tys, funkind_constructor, _) ->
@@ -219,17 +214,40 @@ let find_compatible_rt function_types args =
       let errors, omitted = List.split_n errors max_n_errors in
       SignatureErrors (errors, not (List.is_empty omitted))
 
-let matching_function env name args =
-  let name = Utils.stdlib_distribution_name name in
+let find_stan_math_function_return name arg_tys =
   let function_types =
-    Environment.find env name
-    |> List.filter_map ~f:extract_function_types
-    |> List.sort ~compare:(fun (ret1, _, _, _) (ret2, _, _, _) ->
-           UnsizedType.compare_returntype ret1 ret2 ) in
-  find_compatible_rt function_types args
+    Map.find_multi Stan_math_signatures.function_type_map name
+    |> List.filter_map ~f:(function
+         | UnsizedType.UFun (args, return, _, mem) ->
+             Some (return, args, Fn.ignore, mem)
+         | _ -> None ) in
+  find_compatible_rt function_types arg_tys
 
-let matching_stanlib_function =
-  matching_function Environment.stan_math_environment
+let stan_math_return_type name arg_tys =
+  match name with
+  | x when Stan_math_signatures.is_reduce_sum_fn x ->
+      Some (UnsizedType.ReturnType UReal)
+  | x when Stan_math_signatures.(is_variadic_ode_fn x || is_variadic_dae_fn x)
+    ->
+      Some (ReturnType (UArray UVector))
+  | _ -> (
+      let name = Utils.stdlib_distribution_name name in
+      match find_stan_math_function_return name arg_tys with
+      | UniqueMatch (rt, _, _) -> Some rt
+      | _ -> None )
+
+let operator_stan_math_return_type op arg_tys =
+  match (op, arg_tys) with
+  | Operator.IntDivide, [(_, UnsizedType.UInt); (_, UInt)] ->
+      Some (UnsizedType.(ReturnType UInt), [Promotion.NoPromotion; NoPromotion])
+  | IntDivide, _ -> None
+  | _ ->
+      Stan_math_signatures.operator_to_stan_math_fns op
+      |> List.filter_map ~f:(fun name ->
+             match find_stan_math_function_return name arg_tys with
+             | UniqueMatch (rt, _, p) -> Some (rt, p)
+             | _ -> None )
+      |> List.hd
 
 let check_variadic_args allow_lpdf mandatory_arg_tys mandatory_fun_arg_tys
     fun_return args =

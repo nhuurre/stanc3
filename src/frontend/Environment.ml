@@ -28,17 +28,8 @@ type info =
 type t = info list String.Map.t
 
 let stan_math_environment =
-  let functions =
-    Hashtbl.to_alist Stan_math_signatures.stan_math_signatures
-    |> List.map ~f:(fun (key, values) ->
-           ( key
-           , List.map values ~f:(fun (rt, args, mem) ->
-                 let type_ =
-                   UnsizedType.UFun
-                     (args, rt, Fun_kind.suffix_from_name key, mem) in
-                 {type_; kind= `StanMath} ) ) )
-    |> String.Map.of_alist_exn in
-  functions
+  Stan_math_signatures.function_type_map
+  |> Map.map ~f:(List.map ~f:(fun type_ -> {type_; kind= `StanMath}))
 
 let add env key type_ kind = Map.add_multi env ~key ~data:{type_; kind}
 let set_raw env key data = Map.set env ~key ~data
@@ -111,3 +102,19 @@ let nearest_ident env name =
     (* catch any errors in distance and just ignore them, no big deal *)
     Distance.find_min ~max:max_distance (Map.keys env) name
   with _ -> None
+
+let extract_function_types f =
+  match f with
+  | {type_= UFun (args, return, _, mem); kind= `StanMath} ->
+      Some (return, args, (fun x -> Ast.StanLib x), mem)
+  | {type_= UFun (args, return, _, mem); _} ->
+      Some (return, args, (fun x -> UserDefined x), mem)
+  | _ -> None
+
+let matching_function env name args =
+  let name = Utils.stdlib_distribution_name name in
+  let function_types =
+    find env name |> List.filter_map ~f:extract_function_types in
+  SignatureMismatch.find_compatible_rt function_types args
+
+let matching_stanlib_function = matching_function stan_math_environment

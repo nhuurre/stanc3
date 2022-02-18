@@ -2088,6 +2088,15 @@ let () =
       List.iter data ~f:(fun data ->
           Hashtbl.add_multi stan_math_signatures ~key ~data ) )
 
+let function_type_map =
+  Hashtbl.to_alist stan_math_signatures
+  |> List.map ~f:(fun (key, values) ->
+         ( key
+         , List.map values ~f:(fun (rt, args, mem) ->
+               UnsizedType.UFun (args, rt, Fun_kind.suffix_from_name key, mem) )
+         ) )
+  |> String.Map.of_alist_exn
+
 let%expect_test "dist name suffix" =
   dist_name_suffix [] "normal" |> print_endline ;
   [%expect {| _lpdf |}]
