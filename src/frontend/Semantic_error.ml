@@ -365,7 +365,7 @@ module StatementError = struct
     | CannotAssignToGlobal of string
     | CannotAssignFunction of UnsizedType.t
     | LValueMultiIndexing
-    | LValueTupleUnpackDuplicates of Ast.untyped_lval list
+    | LValueTupleUnpackDuplicates of string list
     | InvalidSamplingPDForPMF
     | InvalidSamplingCDForCCDF of string
     | InvalidSamplingNoSuchDistribution of string * bool
@@ -406,18 +406,18 @@ module StatementError = struct
     | LValueMultiIndexing ->
         Fmt.pf ppf
           "Left hand side of an assignment cannot have nested multi-indexing."
-    | LValueTupleUnpackDuplicates lvs ->
-        let rec pp_lvalue ppf (l : Ast.untyped_lval) =
-          let open Fmt in
-          match l.lval with
-          | LVariable id -> string ppf id.name
-          | LIndexed (l, _) -> pf ppf "%a[...]" pp_lvalue l
-          | LTupleProjection (l, ix) -> pf ppf "%a.%n" pp_lvalue l ix in
-        Fmt.pf ppf
-          "@[<v2>The same value cannot be assigned to multiple times in one \
-           assignment:@ @[%a@]@]"
-          Fmt.(list ~sep:comma pp_lvalue)
-          lvs
+    | LValueTupleUnpackDuplicates lvs -> (
+      match lvs with
+      | [l1; l2] when String.equal l1 l2 ->
+          Fmt.pf ppf
+            "The same value cannot be assigned to multiple times in one \
+             assignment."
+      | _ ->
+          Fmt.pf ppf
+            "@[<v2>The same value cannot be assigned to multiple times in one \
+             assignment. The following values may overlap:@ @[%a@]@]"
+            Fmt.(list ~sep:comma Fmt.string)
+            lvs )
     | TargetPlusEqualsOutsideModelOrLogProb ->
         Fmt.pf ppf
           "Target can only be accessed in the model block or in definitions of \
