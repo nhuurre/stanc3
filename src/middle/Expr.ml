@@ -102,10 +102,15 @@ module Helpers = struct
   let one = int 1
 
   let unary_op op e =
-    {meta= Typed.Meta.empty; pattern= FunApp (Operator op, [e])}
+    match op with
+    | Operator.PMinus -> {meta= e.meta; pattern= FunApp (Operator op, [e])}
+    | _ -> {meta= Typed.Meta.empty; pattern= FunApp (Operator op, [e])}
 
   let binop e1 op e2 =
-    {meta= Typed.Meta.empty; pattern= FunApp (Operator op, [e1; e2])}
+    match op with
+    | Operator.Plus | Minus | Times | Divide ->
+        {meta= e1.meta; pattern= FunApp (Operator op, [e1; e2])}
+    | _ -> {meta= Typed.Meta.empty; pattern= FunApp (Operator op, [e1; e2])}
 
   let binop_list es op ~default =
     match es with

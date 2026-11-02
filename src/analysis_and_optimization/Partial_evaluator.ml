@@ -153,6 +153,19 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                         { pattern= Lit (Real, i)
                         ; meta= {im.meta with type_= UReal} } in
                     FunApp (StanLib ("to_complex", FnPlain), [r; im_part])
+                | Minus, [{pattern= FunApp (Operator Plus, [x; y]); _}; z]
+                  when (not preserve_stability) && Expr.Typed.equal y z
+                       && UnsizedType.equal x.meta.type_ e.meta.type_
+                       && not (Mir_utils.cannot_duplicate_expr y) ->
+                    x.pattern
+                | ( Minus
+                  , [ {pattern= FunApp (StanLib ("fma", FnPlain), [x; y; z]); _}
+                    ; w ] )
+                  when (not preserve_stability) && Expr.Typed.equal z w
+                       && (UnsizedType.equal x.meta.type_ e.meta.type_
+                          || UnsizedType.equal y.meta.type_ e.meta.type_)
+                       && not (Mir_utils.cannot_duplicate_expr z) ->
+                    FunApp (Operator Times, [x; y])
                 | Minus, [x; {pattern= FunApp (StanLib ("erf", FnPlain), l); _}]
                   when is_int 1 x ->
                     FunApp (StanLib ("erfc", FnPlain), l)
@@ -188,6 +201,11 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                   )
                   when is_int 1 x ->
                     FunApp (StanLib ("gamma_p", FnPlain), l)
+                | Divide, [{pattern= FunApp (Operator Times, [x; y])}; z]
+                  when (not preserve_stability) && Expr.Typed.equal y z
+                       && UnsizedType.equal x.meta.type_ e.meta.type_
+                       && not (Mir_utils.cannot_remove_expr z) ->
+                    x.pattern
                 | ( Times
                   , [ { pattern=
                           FunApp
@@ -650,6 +668,74 @@ let rec eval_expr ?(preserve_stability = false) (e : Expr.Typed.t) =
                     FunApp
                       ( StanLib ("normal_id_glm_lpdf", suffix)
                       , [y; x; Expr.Helpers.zero; beta; sigma] )
+                | ( "normal_lpdf"
+                  , [ ({meta= {type_= UReal | UInt; _}} as y)
+                    ; ({meta= {type_= UReal | UInt; _}} as mu)
+                    ; ({meta= {type_= UReal | UInt; _}} as sigma) ] )
+                  when not (Mir_utils.cannot_duplicate_expr sigma) ->
+                    let diff =
+                      if is_int 0 mu then y else Expr.Helpers.binop y Minus mu
+                    in
+                    let ratio =
+                      if is_int 1 sigma then diff
+                      else Expr.Helpers.binop diff Divide sigma in
+                    FunApp
+                      ( Operator Minus
+                      , [ { e with
+                            pattern=
+                              FunApp
+                                (StanLib ("std_normal_lpdf", suffix), [ratio])
+                          }
+                        ; { e with
+                            pattern= FunApp (StanLib ("log", FnPlain), [sigma])
+                          } ] )
+                | "normal_lpdf", [y; mu; sigma]
+                  when Expr.Typed.type_of y = UVector
+                       && (not (Mir_utils.cannot_duplicate_expr sigma))
+                       && not (Mir_utils.cannot_duplicate_expr y) ->
+                    let rec length : Expr.Typed.t -> Expr.Typed.t = function
+                      | { pattern=
+                            FunApp
+                              ( ( Operator (Plus | Times)
+                                | StanLib ("fma", FnPlain) )
+                              , ({ meta=
+                                     { type_= UVector | URowVector | UArray UReal
+                                     ; _ }
+                                 ; _ } as x)
+                                :: _ )
+                        ; _ } ->
+                          length x
+                      | x ->
+                          Expr.Helpers.internal_funapp FnLength [x]
+                            Expr.Typed.Meta.empty in
+                    let diff =
+                      if is_int 0 mu then y else Expr.Helpers.binop y Minus mu
+                    in
+                    let ratio =
+                      if is_int 1 sigma then diff
+                      else Expr.Helpers.binop diff Divide sigma in
+                    FunApp
+                      ( Operator Minus
+                      , [ { e with
+                            pattern=
+                              FunApp
+                                (StanLib ("std_normal_lpdf", suffix), [ratio])
+                          }
+                        ; { e with
+                            pattern=
+                              (if UnsizedType.is_scalar_type sigma.meta.type_
+                               then
+                                 FunApp
+                                   ( StanLib ("lmultiply", FnPlain)
+                                   , [length y; sigma] )
+                               else
+                                 FunApp
+                                   ( StanLib ("sum", FnPlain)
+                                   , [ { e with
+                                         pattern=
+                                           FunApp
+                                             (StanLib ("log", FnPlain), [sigma])
+                                       } ] )) } ] )
                 | ( "poisson_lpmf"
                   , [ y
                     ; { pattern=
@@ -922,6 +1008,16 @@ let expand_indices name known_sizes indices =
 let expand_indices_expr known_sizes = function
   | Expr.Pattern.Indexed (({Expr.pattern= Var name; _} as obj), indices) ->
       Expr.Pattern.Indexed (obj, expand_indices name known_sizes indices)
+  | FunApp
+      ( CompilerInternal FnLength
+      , [ { pattern= Var x
+          ; meta=
+              { Expr.Typed.Meta.type_=
+                  UVector | URowVector | UArray (UReal | UInt)
+              ; _ } } ] ) as e
+    when String.Map.mem x known_sizes ->
+      Array.unsafe_get (String.Map.find x known_sizes) 0
+      |> Option.value_map ~f:(fun x -> x.Expr.pattern) ~default:e
   | e -> e
 
 let remove_trailing_alls_expr = function
@@ -1037,6 +1133,20 @@ let rec eval_stmt info Stmt.{pattern; meta} =
         let _, thn = eval_stmt (copy_context info) thn in
         let info, els = eval_stmt info els in
         (erase_stmt info thn, IfElse (cond, thn, Some els) |> swrap)
+    | TargetPE e -> (
+        let rec unwind : Expr.Typed.t -> Expr.Typed.t list = function
+          | {pattern= FunApp (Operator Plus, [x; y]); _} -> unwind x @ unwind y
+          | {pattern= FunApp (Operator Minus, [x; y]); _} ->
+              unwind x
+              @ List.map (unwind y) ~f:(function
+                | {Expr.pattern= FunApp (Operator PMinus, [x]); _} -> x
+                | e -> Expr.Helpers.unary_op PMinus e)
+          | e -> [e] in
+        match unwind (expr e) with
+        | [e] -> (info, TargetPE e |> swrap)
+        | es ->
+            ( info
+            , SList (List.map es ~f:(fun e -> TargetPE e |> swrap)) |> swrap ))
     | other -> (info, Stmt.Pattern.map expr Fun.id other |> swrap)
   with Rejected (loc, m) ->
     ( info
